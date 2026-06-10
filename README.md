@@ -35,6 +35,28 @@ Then point your agent's `CLAUDE.md` / `AGENTS.md` at `docs/repo-map.md` and ever
 - **HTML pages → API calls** — which endpoints each page's JS actually hits
 - **npm scripts**, **Cloudflare wrangler bindings** (D1/R2/KV/queues/crons)
 
+## Not just code — it maps *any* folder of *any* files
+
+repolens is not tied to source code. It walks **any directory** and handles every file in one of three tiers:
+
+| Tier | Which files | What you get |
+|---|---|---|
+| **1 · Inventory** (always) | **everything**, including binaries | tree, sizes, treemap, per-type counts. Images, video, PDFs, fonts, archives are *located and sized* — not opened |
+| **2 · Text** (automatic) | any text file | line counts, language, size-weighted treemap |
+| **3 · Deep extraction** | text matching your extractors | structured catalogs (see below) |
+
+Because tier 3 is **regex-over-text**, it works on **any textual format** — Markdown, YAML, TOML, CSV, `.env`, JSON, HTML, SQL, OpenAPI specs, logs, prose — not only code. A few non-code uses, each just one extractor in the config:
+
+- **Knowledge base / docs** — pull front-matter, headings, tags and `[[wiki-links]]` out of a folder of Markdown notes (e.g. an Obsidian vault) → a navigable catalog + a treemap of your knowledge
+- **Glossaries / datasets** — terms from a CSV, keys from a YAML, entries from a data dictionary
+- **API specs** — endpoints straight from an `openapi.yaml`
+- **Content audits** — every `H1/H2` across your docs, or every `TODO`/`FIXME`
+- **Config sprawl** — every feature flag, event name, or secret-name across the repo
+
+The `repo-map.json` is then **structured data ready to feed an LLM** (or a RAG pipeline, a dashboard, a script).
+
+**What it does *not* do (yet):** it inventories binaries but doesn't read inside them (no PDF/`.docx`/`.xlsx` text extraction — that would need dependencies, breaking the zero-dep promise); the import graph covers JS/TS/Python (other languages are ~15 lines of regex each); and it extracts *structure and facts*, not *meaning* — semantic chunking/embeddings stay downstream with your LLM.
+
 ## What people use it for
 
 - **LLM agent onboarding** — the map replaces exploration; sessions start informed, tokens go to the actual task
@@ -69,6 +91,15 @@ The core stays agnostic; your domain plugs in via config. Each extractor is a gl
         "field": "tools",
         "pattern": "\"(mcp__\\w+)\""
       }
+    },
+    {
+      // Non-code example: index a Markdown knowledge base by front-matter.
+      "name": "notes",
+      "title": "Knowledge notes",
+      "glob": "docs/**/*.md",
+      "pattern": "title:\\s*([^\\n]+)[\\s\\S]*?tags:\\s*([^\\n]+)",
+      "flags": "",
+      "fields": ["title", "tags"]
     }
   ]
 }
