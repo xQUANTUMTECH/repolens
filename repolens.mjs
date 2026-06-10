@@ -197,11 +197,28 @@ const fileSet = new Set(files.map((f) => f.rel));
 const edges = [];
 const JS_EXTS = [".js", ".mjs", ".cjs", ".ts", ".mts", ".jsx", ".tsx"];
 
+// Path-alias bare-import (Vite/TS `@/...`, `~/...`). Config: `"aliases": {"@/":
+// ["src/","frontend/src/"]}`. Default copre i casi comuni così l'import graph
+// non considera orfani i file raggiunti solo via alias.
+const ALIASES = userConfig.aliases || { "@/": ["src/", "frontend/src/", "app/"], "~/": ["src/", "frontend/src/"] };
+function resolveCandidates(base) {
+  return [base, ...JS_EXTS.map((e) => base + e), ...JS_EXTS.map((e) => base + "/index" + e)].find((c) => fileSet.has(c)) || null;
+}
 function resolveJs(fromRel, spec) {
-  if (!spec.startsWith(".")) return null;
-  const base = path.posix.join(path.posix.dirname(fromRel), spec).replace(/\?.*$/, "");
-  const cand = [base, ...JS_EXTS.map((e) => base + e), ...JS_EXTS.map((e) => base + "/index" + e)];
-  return cand.find((c) => fileSet.has(c)) || null;
+  spec = spec.replace(/\?.*$/, "");
+  if (spec.startsWith(".")) {
+    return resolveCandidates(path.posix.join(path.posix.dirname(fromRel), spec));
+  }
+  // Alias bare-import: prova ogni base configurata.
+  for (const [prefix, bases] of Object.entries(ALIASES)) {
+    if (!spec.startsWith(prefix)) continue;
+    const rest = spec.slice(prefix.length);
+    for (const b of bases) {
+      const hit = resolveCandidates(path.posix.join(b, rest));
+      if (hit) return hit;
+    }
+  }
+  return null;
 }
 function resolvePy(fromRel, mod) {
   const p = mod.replace(/\./g, "/");
@@ -274,10 +291,12 @@ function lineOf(src, index) {
   const cat = addCatalog("routes", "HTTP routes", ["method", "route", "auth", "file", "line"]);
   const seen = new Set();
   const AUTH_HINTS = [
-    [/requireClienteAccess|requireWorkspaceSession|requireAuth|isAuthenticated|verifyToken|authMiddleware/i, "auth"],
+    [/require\w*Admin|requirePlatformAdmin/i, "admin"],
+    [/requireClienteAccess|requireWorkspaceSession|requireAuth|requireSession|requireUser|isAuthenticated|verifyToken|authMiddleware/i, "auth"],
     [/checkExecutorBearer|EXECUTOR_SECRET|bearer/i, "service-bearer"],
-    [/public|no.?auth/i, "public?"],
+    [/\bpublic\b|no.?auth/i, "public?"],
   ];
+  const GUARD_RE = /require\w*Admin|requireClienteAccess|requireWorkspaceSession|requireAuth|requireSession|requireUser|isAuthenticated|verifyToken|authMiddleware|checkExecutorBearer/;
   function authHint(window) {
     for (const [re, label] of AUTH_HINTS) if (re.test(window)) return label;
     return "";
@@ -293,17 +312,38 @@ function lineOf(src, index) {
     if (![".js", ".mjs", ".ts", ".py", ".go", ".rb"].includes(f.ext)) continue;
     const src = readContent(f.rel);
     if (!src) continue;
+    // Inizi di funzione: per i dispatcher (es. routeAdmin) la guardia auth sta
+    // in cima alla funzione, lontano dalle singole route. Per ogni route
+    // troviamo la funzione che la contiene e, SE è corta (≤4500 char dalla decl
+    // alla route, per non assorbire la guardia di una route vicina dentro un
+    // mega-handler tipo `fetch()`), cerchiamo lì la guardia di scope.
+    const fnStarts = [];
+    const fnRe = /(?:^|\n)\s*(?:export\s+)?(?:async\s+)?function\s+\w+\s*\(|(?:export\s+)?(?:const|let)\s+\w+\s*=\s*(?:async\s*)?\([^)]*\)\s*(?::[^=]+)?=>/g;
+    let fm;
+    while ((fm = fnRe.exec(src))) fnStarts.push(fm.index);
+    function scopeAuth(idx) {
+      let start = 0;
+      for (const s of fnStarts) { if (s < idx) start = s; else break; }
+      if (idx - start > 4500) return ""; // funzione troppo grande → niente scope-guard
+      return GUARD_RE.test(src.slice(start, idx)) ? authHint(src.slice(start, idx)) : "";
+    }
     const push = (method, route, idx) => {
       const k = f.rel + "|" + method + "|" + route;
       if (seen.has(k) || !route.startsWith("/")) return;
       seen.add(k);
       const line = lineOf(src, idx);
-      cat.rows.push({ method, route, auth: authHint(src.slice(idx, idx + 400)), file: f.rel, line, link: fileLink(f.rel, line) });
+      // Auth: il body del handler + 2 righe sopra (commento/guardia inline, es.
+      // route che delega a un handler "// bearer EXECUTOR_SECRET"); poi, per i
+      // dispatcher, la guardia in cima alla funzione (scope, backward limitato).
+      const auth = authHint(src.slice(Math.max(0, idx - 120), idx + 400)) || scopeAuth(idx);
+      cat.rows.push({ method, route, auth, file: f.rel, line, link: fileLink(f.rel, line) });
     };
     let m;
     const re1 = /\b\w+\.(get|post|put|delete|patch|options|all|use|GET|POST|PUT|DELETE)\(\s*["'`](\/[^"'`\s]*)/g;
     while ((m = re1.exec(src))) push(m[1].toUpperCase() === "USE" ? "USE" : m[1].toUpperCase(), m[2], m.index);
-    const re2 = /path(?:name)?\s*===?\s*["'`](\/[^"'`]+)["'`]/g;
+    // Eguaglianza E disuguaglianza: `path === "/x"` (handler) e la guardia negata
+    // `if (url.pathname !== "/x") return` (stile route-module CF Workers).
+    const re2 = /path(?:name)?\s*[!=]==?\s*["'`](\/[^"'`]+)["'`]/g;
     while ((m = re2.exec(src))) push(methodNear(src, m.index), m[1], m.index);
     const re3 = /path(?:name)?\.startsWith\(\s*["'`](\/[^"'`]{3,})/g;
     while ((m = re3.exec(src))) push(methodNear(src, m.index), m[1] + "*", m.index);
