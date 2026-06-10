@@ -128,7 +128,7 @@ function runPortfolio(rootDir) {
   fs.writeFileSync(path.join(outDir, "index.md"), md);
 
   // index.html (treemap progetti + tabella)
-  fs.writeFileSync(path.join(outDir, "index.html"), portfolioHtml({ root: path.basename(rootDir), stamp, totals, projects }));
+  fs.writeFileSync(path.join(outDir, "index.html"), portfolioHtml({ root: path.basename(rootDir), generatedAt: stamp, totals, projects }));
   console.error(`[repolens portfolio] done → ${path.join(outDir, "index.html")}`);
 }
 
