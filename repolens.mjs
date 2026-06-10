@@ -30,6 +30,39 @@ function argOf(flag, dflt) {
   const i = argv.indexOf(flag);
   return i >= 0 && argv[i + 1] ? argv[i + 1] : dflt;
 }
+
+const VERSION = "0.1.0";
+if (argv.includes("--version") || argv.includes("-v")) {
+  console.log("repolens " + VERSION);
+  process.exit(0);
+}
+if (argv.includes("--help") || argv.includes("-h")) {
+  console.log(`repolens ${VERSION} — zero-dependency repository mapper for humans and LLM agents
+
+USAGE
+  repo-lens [dir] [options]                 map a single repository (default dir: .)
+  repo-lens --portfolio <dir> [options]     map every subfolder of <dir> as its own project
+
+OPTIONS
+  --config <file>     JSON/JSONC config: name, lang (en|it), ignore[], aliases{}, extractors[]
+  --out <prefix>      output path prefix (default: repolens-out/repo-map)
+                      → writes <prefix>.md, <prefix>.json, <prefix>.html
+  --max-file-kb <n>   max file size read in full for LOC/extraction (default: 2048)
+  --portfolio <dir>   portfolio mode → <out>/index.{html,md,json} + one map per project
+  --skip <a,b,c>      (portfolio) project folder names to skip
+  --cap <n>           (portfolio) skip projects with more than n files (default: 12000)
+  -h, --help          show this help
+  -v, --version       show version
+
+OUTPUT
+  .md    compact index for humans & LLMs (routes, tables, env, pages, custom catalogs)
+  .json  full machine-readable map (file tree, import graph, catalogs w/ file:line)
+  .html  self-contained interactive dashboard (treemap + import links + sortable tables)
+
+Built by Maurizio Tarricone · https://xquantumtech.com · MIT`);
+  process.exit(0);
+}
+
 const ROOT = path.resolve(argv[0] && !argv[0].startsWith("--") ? argv[0] : ".");
 const CONFIG_PATH = argOf("--config", null);
 const OUT_PREFIX = argOf("--out", "repolens-out/repo-map");
