@@ -20,6 +20,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 // ───────────────────────────── CLI ─────────────────────────────
 
@@ -33,6 +35,168 @@ const CONFIG_PATH = argOf("--config", null);
 const OUT_PREFIX = argOf("--out", "repolens-out/repo-map");
 const MAX_READ_BYTES = Number(argOf("--max-file-kb", "2048")) * 1024;
 
+// ─────────────────────── Portfolio mode ────────────────────────
+// `--portfolio <dir>`: tratta ogni sottocartella di <dir> come un progetto a sé.
+// Lancia repolens UNA VOLTA PER PROGETTO in un processo isolato (niente O(n²) né
+// contentCache globale su decine di migliaia di file), poi cuce un indice
+// portfolio: treemap dei progetti (dimensione = LOC) + tabella, ogni progetto
+// linka alla propria mappa. Opzioni: --cap <maxFilesPerProject> (default 12000,
+// salta i mostri loggando), --config <perProjectConfig> opzionale.
+const PORTFOLIO_DIR = argOf("--portfolio", null);
+if (PORTFOLIO_DIR) {
+  runPortfolio(path.resolve(PORTFOLIO_DIR));
+  process.exit(0);
+}
+
+function runPortfolio(rootDir) {
+  const selfPath = fileURLToPath(import.meta.url);
+  const outDir = path.resolve(argOf("--out", path.join(rootDir, "_repo-maps")));
+  const cap = Number(argOf("--cap", "12000"));
+  const cfg = argOf("--config", null);
+  fs.mkdirSync(outDir, { recursive: true });
+
+  // Skip: cartelle nascoste, output, e l'elenco utente via --skip a,b,c
+  // (es. env/vendored bundle come "nfw" = ambiente Python installato, non codice).
+  const userSkip = new Set((argOf("--skip", "") || "").split(",").map((s) => s.trim()).filter(Boolean));
+  const SKIP_DIR = /^(\.|_repo-maps$|node_modules$)/;
+  const HEAVY = new Set(["node_modules", ".git", "target", "dist", "build", ".next", "venv", ".venv", "__pycache__", "vendor", ".turbo"]);
+  function countFilesQuick(dir, limit) {
+    let n = 0;
+    const stack = [dir];
+    while (stack.length) {
+      let entries;
+      try { entries = fs.readdirSync(stack.pop(), { withFileTypes: true }); } catch { continue; }
+      for (const e of entries) {
+        if (e.isDirectory()) { if (!HEAVY.has(e.name) && !e.name.startsWith(".")) stack.push(path.join(e.path || dir, e.name)); }
+        else if (++n > limit) return n;
+      }
+    }
+    return n;
+  }
+
+  const subdirs = fs.readdirSync(rootDir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !SKIP_DIR.test(e.name) && !userSkip.has(e.name))
+    .map((e) => e.name)
+    .sort((a, b) => a.localeCompare(b));
+
+  console.error(`[repolens portfolio] ${subdirs.length} progetti in ${rootDir} → ${outDir}`);
+  const projects = [];
+  let i = 0;
+  for (const name of subdirs) {
+    i++;
+    const projDir = path.join(rootDir, name);
+    const safe = name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "project";
+    const projOut = path.join(outDir, safe);
+    const nFiles = countFilesQuick(projDir, cap + 1);
+    if (nFiles > cap) {
+      console.error(`  [${i}/${subdirs.length}] SKIP ${name} (${nFiles}+ file > cap ${cap})`);
+      projects.push({ name, safe, skipped: true, files: nFiles, loc: 0, byLang: {}, catalogs: {} });
+      continue;
+    }
+    process.stderr.write(`  [${i}/${subdirs.length}] ${name} … `);
+    const args = [selfPath, projDir, "--out", projOut];
+    if (cfg) args.push("--config", cfg);
+    const r = spawnSync(process.execPath, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    let summary = null;
+    try { summary = JSON.parse(fs.readFileSync(projOut + ".json", "utf8")); } catch { /* failed */ }
+    if (summary) {
+      const cats = {};
+      for (const [k, c] of Object.entries(summary.catalogs || {})) cats[k] = c.rows.length;
+      const codeLoc = summary.stats.codeLoc ?? summary.stats.loc;
+      projects.push({ name, safe, files: summary.stats.files, loc: summary.stats.loc, codeLoc, byLang: summary.stats.byLang, catalogs: cats, html: safe + ".html" });
+      console.error(`${summary.stats.files} file · ${codeLoc.toLocaleString()} code LOC (${summary.stats.loc.toLocaleString()} total)`);
+    } else {
+      console.error(`FAIL${r.status ? " (exit " + r.status + ")" : ""}`);
+      projects.push({ name, safe, failed: true, files: 0, loc: 0, byLang: {}, catalogs: {} });
+    }
+  }
+
+  // Ranking per CODE LOC (il segnale vero); fallback su loc per gli skip.
+  projects.sort((a, b) => (b.codeLoc ?? b.loc ?? 0) - (a.codeLoc ?? a.loc ?? 0));
+  const totals = projects.reduce((t, p) => ({ files: t.files + (p.files || 0), loc: t.loc + (p.loc || 0), codeLoc: t.codeLoc + (p.codeLoc || 0) }), { files: 0, loc: 0, codeLoc: 0 });
+  const stamp = new Date().toISOString();
+  fs.writeFileSync(path.join(outDir, "index.json"), JSON.stringify({ tool: "repolens", mode: "portfolio", root: rootDir, generatedAt: stamp, totals, projects }, null, 1));
+
+  // index.md
+  let md = `# Portfolio — ${path.basename(rootDir)}\n\n> repolens portfolio · ${stamp} · ${projects.length} projects · ${totals.files.toLocaleString()} files · ${totals.codeLoc.toLocaleString()} code LOC (${totals.loc.toLocaleString()} total incl. data/markup)\n\n`;
+  md += `| project | files | code LOC | total LOC | top language | map |\n| --- | --- | --- | --- | --- | --- |\n`;
+  for (const p of projects) {
+    const top = Object.entries(p.byLang || {}).sort((a, b) => b[1] - a[1])[0];
+    const status = p.skipped ? "_(skipped: too big)_" : p.failed ? "_(failed)_" : `[map](${p.html})`;
+    md += `| ${p.name} | ${(p.files || 0).toLocaleString()} | ${(p.codeLoc || 0).toLocaleString()} | ${(p.loc || 0).toLocaleString()} | ${top ? top[0] : "—"} | ${status} |\n`;
+  }
+  fs.writeFileSync(path.join(outDir, "index.md"), md);
+
+  // index.html (treemap progetti + tabella)
+  fs.writeFileSync(path.join(outDir, "index.html"), portfolioHtml({ root: path.basename(rootDir), stamp, totals, projects }));
+  console.error(`[repolens portfolio] done → ${path.join(outDir, "index.html")}`);
+}
+
+function portfolioHtml(d) {
+  const data = JSON.stringify(d);
+  const TPL = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>__ROOT__ — repolens portfolio</title>
+<style>
+:root{--bg:#fafafa;--card:#fff;--line:#e4e4e7;--txt:#18181b;--dim:#71717a;--acc:#65a30d;}
+*{box-sizing:border-box;margin:0}body{background:var(--bg);color:var(--txt);font:14px/1.5 system-ui,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+header{background:var(--card);border-bottom:1px solid var(--line);border-top:4px solid;border-image:linear-gradient(90deg,#a3e635,#65a30d,#18181b)1;padding:16px 26px}
+header .t{font-size:20px;font-weight:800}header .t em{font-style:normal;color:var(--acc)}header .s{color:var(--dim);font-size:12.5px;margin-top:2px}
+main{flex:1;display:flex;min-height:0}
+#left{flex:1.7;border-right:1px solid var(--line);display:flex;flex-direction:column;min-width:0}
+#cv{flex:1;width:100%;display:block}
+#right{flex:1;min-width:330px;max-width:560px;display:flex;flex-direction:column}
+#search{margin:12px 14px 6px;padding:8px 12px;border:1px solid var(--line);border-radius:9px;font:inherit}
+#list{flex:1;overflow-y:auto;padding:4px 14px 20px}
+.row{display:grid;grid-template-columns:1fr auto;gap:8px;padding:8px 6px;border-bottom:1px solid #f1f1f3;cursor:pointer;align-items:center}
+.row:hover{background:#f6f7f4}.row .nm{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .meta{color:var(--dim);font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
+.row .lang{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;vertical-align:middle}
+.tag{font-size:10px;padding:1px 6px;border-radius:5px;background:#f4f4f5;color:var(--dim);margin-left:6px}
+#tip{position:fixed;pointer-events:none;background:#18181b;color:#fff;padding:7px 10px;border-radius:7px;font-size:12px;display:none;z-index:9;box-shadow:0 6px 20px rgba(0,0,0,.2)}
+</style></head><body>
+<header><div class="t"><em>◳ repolens</em> portfolio · __ROOT__</div><div class="s" id="s"></div></header>
+<main>
+<div id="left"><canvas id="cv"></canvas></div>
+<div id="right"><input id="search" placeholder="filter projects…"/><div id="list"></div></div>
+</main><div id="tip"></div>
+<script>
+var D=__DATA__;
+var PAL={JavaScript:"#f7df1e",TypeScript:"#3178c6",Python:"#3776ab",Rust:"#dea584",Go:"#00add8",HTML:"#e34c26",CSS:"#563d7c",Java:"#b07219","C++":"#f34b7d",C:"#555",Ruby:"#cc342d",PHP:"#4f5d95",Vue:"#41b883",Svelte:"#ff3e00",Shell:"#89e051",JSON:"#999",Markdown:"#a5b4fc",Other:"#cbd5e1",Binary:"#94a3b8"};
+function topLang(p){var e=Object.entries(p.byLang||{}).sort(function(a,b){return b[1]-a[1]});return e[0]?e[0][0]:"Other";}
+function col(p){return PAL[topLang(p)]||"#cbd5e1";}
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
+function fmt(n){return Number(n||0).toLocaleString();}
+function CL(p){return p.codeLoc!=null?p.codeLoc:p.loc||0;} // code LOC (fallback total)
+document.getElementById("s").textContent=D.projects.length+" projects · "+fmt(D.totals.files)+" files · "+fmt(D.totals.codeLoc!=null?D.totals.codeLoc:D.totals.loc)+" code LOC · "+D.generatedAt.slice(0,16).replace("T"," ");
+var cv=document.getElementById("cv"),ctx=cv.getContext("2d"),tip=document.getElementById("tip"),cells=[];
+function squ(items,x,y,w,h,out){items=items.map(function(c){return {p:c,loc:CL(c)};}).filter(function(c){return c.loc>0});if(!items.length)return;var total=items.reduce(function(a,c){return a+c.loc},0),i=0;
+while(i<items.length){var row=[],rs=0,horiz=w>=h,side=horiz?h:w,best=Infinity;
+for(var j=i;j<items.length;j++){var ts=rs+items[j].loc,tr=row.concat([items[j]]),ra=ts*((w*h)/total),th=ra/side,worst=0;
+tr.forEach(function(it){var len=(it.loc*((w*h)/total))/th,r=Math.max(th/len,len/th);if(r>worst)worst=r;});
+if(worst<=best){best=worst;row=tr;rs=ts;}else break;}
+i+=row.length;var ra2=rs*((w*h)/total),th=ra2/side,off=0;
+row.forEach(function(it){var len=(it.loc*((w*h)/total))/th;out.push({p:it.p,x:horiz?x:x+off,y:horiz?y+off:y,w:horiz?th:len,h:horiz?len:th});off+=len;});
+if(horiz){x+=th;w-=th;}else{y+=th;h-=th;}total-=rs;}}
+function layout(){var r=cv.parentElement.getBoundingClientRect();cv.width=r.width*devicePixelRatio;cv.height=r.height*devicePixelRatio;ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);cells=[];squ(D.projects.filter(function(p){return CL(p)>0;}),0,0,r.width,r.height,cells);draw();}
+function draw(){var r=cv.getBoundingClientRect();ctx.clearRect(0,0,r.width,r.height);cells.forEach(function(c){ctx.fillStyle=col(c.p);ctx.fillRect(c.x+.5,c.y+.5,Math.max(0,c.w-1),Math.max(0,c.h-1));ctx.strokeStyle="#fff";ctx.strokeRect(c.x+.5,c.y+.5,Math.max(0,c.w-1),Math.max(0,c.h-1));
+if(c.w>62&&c.h>20){ctx.fillStyle="rgba(0,0,0,.78)";ctx.font="600 11px system-ui";ctx.save();ctx.beginPath();ctx.rect(c.x+3,c.y+2,c.w-6,16);ctx.clip();ctx.fillText(c.p.name,c.x+5,c.y+13);ctx.restore();
+if(c.h>34){ctx.fillStyle="rgba(0,0,0,.5)";ctx.font="10px system-ui";ctx.fillText(fmt(CL(c.p))+" LOC",c.x+5,c.y+26);}}});}
+function at(ev){var r=cv.getBoundingClientRect(),x=ev.clientX-r.left,y=ev.clientY-r.top;for(var i=cells.length-1;i>=0;i--){var c=cells[i];if(x>=c.x&&x<=c.x+c.w&&y>=c.y&&y<=c.y+c.h)return c;}return null;}
+cv.addEventListener("mousemove",function(ev){var c=at(ev);if(!c){tip.style.display="none";cv.style.cursor="default";return;}cv.style.cursor="pointer";tip.style.display="block";tip.style.left=Math.min(innerWidth-260,ev.clientX+14)+"px";tip.style.top=(ev.clientY+12)+"px";tip.innerHTML="<b>"+esc(c.p.name)+"</b><br>"+fmt(c.p.files)+" files · "+fmt(CL(c.p))+" code LOC<br>"+fmt(c.p.loc)+" total · "+esc(topLang(c.p));});
+cv.addEventListener("mouseleave",function(){tip.style.display="none";});
+cv.addEventListener("click",function(ev){var c=at(ev);if(c&&c.p.html)location.href=c.p.html;});
+function renderList(){var q=(document.getElementById("search").value||"").toLowerCase();var el=document.getElementById("list");el.innerHTML="";
+D.projects.filter(function(p){return!q||p.name.toLowerCase().indexOf(q)>=0;}).forEach(function(p){var d=document.createElement("div");d.className="row";
+var tag=p.skipped?'<span class="tag">skipped</span>':p.failed?'<span class="tag">failed</span>':"";
+d.innerHTML='<div class="nm"><span class="lang" style="background:'+col(p)+'"></span>'+esc(p.name)+tag+'</div><div class="meta">'+fmt(CL(p))+' code LOC · '+fmt(p.files)+'f</div>';
+if(p.html)d.onclick=function(){location.href=p.html;};el.appendChild(d);});}
+document.getElementById("search").addEventListener("input",renderList);
+addEventListener("resize",layout);renderList();layout();
+</script></body></html>`;
+  return TPL.replace("__DATA__", data).replace(/__ROOT__/g, String(d.root).replace(/[<>&]/g, ""));
+}
+
 // ─────────────────────────── Config ────────────────────────────
 
 const DEFAULT_IGNORE_DIRS = new Set([
@@ -40,14 +204,32 @@ const DEFAULT_IGNORE_DIRS = new Set([
   "__pycache__", ".venv", "venv", "target", ".next", ".cache", ".idea",
   ".vscode", ".wrangler", ".wrangler-check", ".wrangler-typecheck",
   "_archive", "_dump", ".devcontainer", ".turbo", ".parcel-cache",
+  // ambienti/dipendenze installate, non codice scritto
+  "site-packages", ".tox", ".mypy_cache", ".pytest_cache", ".gradle",
+  "Pods", ".terraform", "bower_components", ".pnp", "__snapshots__",
 ]);
+// Linguaggi che NON sono codice sorgente scritto: per il portfolio servono i
+// "code LOC" reali, non dati/markup/config. (Una repo da 6.9M LOC di JSON non è
+// 6.9M di codice.) Restano nell'inventario, ma contano come dataLoc.
+const NON_CODE_LANGS = new Set(["JSON", "YAML", "TOML", "Markdown", "CSV", "Other", "Binary"]);
 const BINARY_EXTS = new Set([
   ".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".ico", ".bmp", ".tiff",
   ".mp4", ".mp3", ".wav", ".webm", ".mov", ".zip", ".gz", ".tar", ".7z",
   ".woff", ".woff2", ".ttf", ".otf", ".eot", ".pdf", ".exe", ".dll", ".so",
   ".dylib", ".bin", ".db", ".sqlite", ".wasm", ".jar", ".class", ".pyc",
+  // ML model weights / tensors / serialized data — binary, "lines" are meaningless
+  // (caso reale: un model.onnx contava 1.5M "righe" → 38M LOC fantasma).
+  ".onnx", ".safetensors", ".gguf", ".ggml", ".pt", ".pth", ".ckpt", ".h5",
+  ".pb", ".tflite", ".npy", ".npz", ".pkl", ".pickle", ".joblib", ".model",
+  ".weights", ".arrow", ".feather", ".parquet", ".msgpack", ".pyd", ".o", ".a", ".lib",
 ]);
-const IGNORE_FILES = [/\.min\.(js|css)$/i, /\.map$/i, /package-lock\.json$/i, /yarn\.lock$/i, /pnpm-lock\.yaml$/i];
+const IGNORE_FILES = [
+  /\.min\.(js|css)$/i, /\.map$/i,
+  // lockfile — generati, enormi, non codice scritto
+  /(^|\/)package-lock\.json$/i, /(^|\/)yarn\.lock$/i, /(^|\/)pnpm-lock\.yaml$/i,
+  /(^|\/)cargo\.lock$/i, /(^|\/)poetry\.lock$/i, /(^|\/)composer\.lock$/i,
+  /(^|\/)gemfile\.lock$/i, /(^|\/)bun\.lockb$/i, /\.lock$/i,
+];
 
 const LANG_BY_EXT = {
   ".js": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript", ".jsx": "JavaScript",
@@ -546,6 +728,9 @@ for (const k of Object.keys(catalogs)) if (!catalogs[k].rows.length) delete cata
 // ─────────────────────────── Stats ─────────────────────────────
 
 const totalLoc = files.reduce((a, f) => a + f.loc, 0);
+// codeLoc = righe dei soli linguaggi di codice (esclude JSON/YAML/MD/data/binari):
+// è la metrica che conta davvero per "quanto codice è stato scritto".
+const codeLoc = files.reduce((a, f) => a + (NON_CODE_LANGS.has(f.lang) ? 0 : f.loc), 0);
 const byLang = {};
 for (const f of files) byLang[f.lang] = (byLang[f.lang] || 0) + f.loc;
 const areas = tree.children.filter((c) => !c.file).map((c) => ({ area: c.name, loc: c.loc, files: countFiles(c) }));
@@ -563,7 +748,7 @@ fs.mkdirSync(path.dirname(outPrefixAbs), { recursive: true });
 
 const jsonOut = {
   meta: { tool: "repolens", repo: repoName, root: ROOT, generatedAt, linkPrefix },
-  stats: { files: files.length, loc: totalLoc, byLang, areas },
+  stats: { files: files.length, loc: totalLoc, codeLoc, byLang, areas },
   godFiles: godFiles.map((f) => ({ file: f.rel, loc: f.loc, link: fileLink(f.rel) })),
   fan: { topFanIn, topFanOut },
   catalogs,
