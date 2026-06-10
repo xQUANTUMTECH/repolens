@@ -1,0 +1,40 @@
+{
+  "name": "repo-lens",
+  "version": "0.1.0",
+  "description": "Messy or gigantic repo? Don't waste tokens to map it. Zero-dependency repository mapper for humans and LLM agents: MD index + JSON graph + interactive treemap dashboard.",
+  "type": "module",
+  "bin": {
+    "repo-lens": "./repolens.mjs"
+  },
+  "files": [
+    "repolens.mjs",
+    "README.md",
+    "LICENSE",
+    "examples"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "llm",
+    "ai-agents",
+    "repository-map",
+    "codebase-map",
+    "treemap",
+    "code-visualization",
+    "static-analysis",
+    "claude",
+    "context",
+    "zero-dependency"
+  ],
+  "author": "Maurizio Tarricone (https://xquantumtech.com)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xQUANTUMTECH/repolens.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xQUANTUMTECH/repolens/issues"
+  },
+  "homepage": "https://github.com/xQUANTUMTECH/repolens#readme"
+}

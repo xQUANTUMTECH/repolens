@@ -1,0 +1,38 @@
+{
+  "name": "my-project",
+  "lang": "en",
+  "ignore": [
+    "**/*.generated.*",
+    "fixtures/**",
+    "docs/repo-map.*"
+  ],
+  "extractors": [
+    {
+      "name": "feature_flags",
+      "title": "Feature flags",
+      "glob": "src/**/*.{ts,js}",
+      "pattern": "isEnabled\\(\\s*[\"']([\\w.-]+)[\"']",
+      "flags": "g",
+      "fields": ["flag"],
+      "unique": true
+    },
+    {
+      "name": "cli_commands",
+      "title": "CLI commands",
+      "glob": "src/cli/**/*.ts",
+      "pattern": "command\\(\\s*[\"']([\\w:-]+)[\"']\\s*,\\s*[\"']([^\"']{0,200})",
+      "flags": "g",
+      "fields": ["command", "description"],
+      "maxLen": 200
+    },
+    {
+      "name": "events",
+      "title": "Emitted events",
+      "glob": "**/*.{ts,js,mjs}",
+      "pattern": "emit\\(\\s*[\"']([\\w:.-]+)[\"']",
+      "flags": "g",
+      "fields": ["event"],
+      "unique": true
+    }
+  ]
+}
