@@ -3,15 +3,15 @@
 > **Messy or gigantic repo? Don't waste tokens to map it.**
 > Run one command, get the full map — and feed it to your AI.
 
-![zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen) ![node](https://img.shields.io/badge/node-%E2%89%A518-blue) ![license](https://img.shields.io/badge/license-MIT-black) ![tokens](https://img.shields.io/badge/LLM%20tokens%20spent-0-lime)
+[![npm](https://img.shields.io/npm/v/@x-quantum-tech/repolens)](https://www.npmjs.com/package/@x-quantum-tech/repolens) ![zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen) ![node](https://img.shields.io/badge/node-%E2%89%A518-blue) ![license](https://img.shields.io/badge/license-MIT-black) ![tokens](https://img.shields.io/badge/LLM%20tokens%20spent-0-lime)
 
 Every time an LLM agent opens a mid-size repository, it burns **100k–500k tokens** re-discovering facts that never change between commits: where the routes are, what tables exist, which env vars matter, which file is the god-file. **repolens extracts all of it deterministically, in seconds, with zero LLM calls** — one self-contained script, no dependencies, Node 18+.
 
 ```bash
-# one-shot, no install (after npm publish)
-npx repo-lens . --config repolens.config.json --out docs/repo-map
+# one-shot, no install
+npx @x-quantum-tech/repolens . --config repolens.config.json --out docs/repo-map
 
-# or just grab the single file - it has zero dependencies
+# or just grab the single file — it has zero dependencies
 node repolens.mjs . --config repolens.config.json --out docs/repo-map
 ```
 

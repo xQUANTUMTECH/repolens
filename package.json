@@ -1,10 +1,13 @@
 {
-  "name": "repo-lens",
+  "name": "@x-quantum-tech/repolens",
   "version": "0.1.0",
   "description": "Messy or gigantic repo? Don't waste tokens to map it. Zero-dependency repository mapper for humans and LLM agents: MD index + JSON graph + interactive treemap dashboard.",
   "type": "module",
   "bin": {
-    "repo-lens": "./repolens.mjs"
+    "repolens": "./repolens.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "repolens.mjs",
